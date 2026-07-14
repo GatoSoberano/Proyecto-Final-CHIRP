@@ -1,0 +1,13 @@
+# Node
+node_modules/
+dist/
+.next/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Env
+.env
+# Modelos grandes: se regeneran con el notebook o train_fallback.py
+# (si prefieres versionarlos, usa 
