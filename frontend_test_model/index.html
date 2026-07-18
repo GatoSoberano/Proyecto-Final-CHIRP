@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tester de Toxicidad</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <main class="app">
+    <h1>Tester de Toxicidad</h1>
+    <p class="subtitle">Envía un mensaje al endpoint de Python para probar el modelo.</p>
+
+    <section class="panel">
+      <label for="apiUrl">URL de API</label>
+      <input id="apiUrl" type="text" value="http://localhost:8000/predict" />
+
+      <label for="message">Mensaje</label>
+      <textarea id="message" rows="5" placeholder="Ejemplo: eres un idiota, callate"></textarea>
+
+      <button id="predictBtn" type="button">Probar modelo</button>
+    </section>
+
+    <section class="panel result" id="result" aria-live="polite">
+      <h2>Resultado</h2>
+      <p id="status">Esperando prueba...</p>
+      <div class="meter-wrap">
+        <div id="meter" class="meter"></div>
+      </div>
+      <p id="details"></p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+
+</html>

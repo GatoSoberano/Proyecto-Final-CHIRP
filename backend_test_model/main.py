@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
 import os
@@ -8,6 +9,15 @@ app = FastAPI(
     title="Toxicity Model API",
     description="API para probar el modelo de clasificación de toxicidad en español",
     version="1.0.0"
+)
+
+# Permite que un frontend local consuma la API desde el navegador.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Esquema de request
