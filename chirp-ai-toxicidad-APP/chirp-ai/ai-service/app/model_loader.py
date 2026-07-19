@@ -13,6 +13,8 @@ from .moderation import make_synthetic_dataset, word_weights
 
 MODEL_PATH = os.getenv("MODEL_PATH", "models/toxicity_model.pkl")
 TOXIC_THRESHOLD = float(os.getenv("TOXIC_THRESHOLD", "0.5"))
+FLAG_WEIGHT_MIN = float(os.getenv("FLAG_WEIGHT_MIN", "0.08"))
+TOKEN_TOXIC_WEIGHT = float(os.getenv("TOKEN_TOXIC_WEIGHT", "0.12"))
 
 
 class ModelService:
@@ -44,10 +46,12 @@ class ModelService:
         """Devuelve score 0-100, is_toxic y tokens con peso para resaltar."""
         proba = float(self._pipeline.predict_proba([text])[0][1])
         tokens = word_weights(self._pipeline, text)
-        flagged = [t for t in tokens if t["weight"] > 0]
+        flagged = [t for t in tokens if t["weight"] >= FLAG_WEIGHT_MIN]
+        max_token_weight = max((t["weight"] for t in tokens), default=0.0)
+        is_toxic = proba >= TOXIC_THRESHOLD or max_token_weight >= TOKEN_TOXIC_WEIGHT
         return {
             "toxicity_score": round(proba * 100, 2),
-            "is_toxic": proba >= TOXIC_THRESHOLD,
+            "is_toxic": is_toxic,
             "tokens": tokens,
             "flagged_words": flagged,
         }
