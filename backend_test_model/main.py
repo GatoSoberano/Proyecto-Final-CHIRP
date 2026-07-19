@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from mangum import Mangum
 from pydantic import BaseModel
+from typing import List
+
 import joblib
 import os
 
@@ -10,6 +13,9 @@ app = FastAPI(
     description="API para probar el modelo de clasificación de toxicidad en español",
     version="1.0.0"
 )
+
+# Para compatibilidad con AWS Lambda
+handler = Mangum(app)  
 
 # Permite que un frontend local consuma la API desde el navegador.
 app.add_middleware(
@@ -103,7 +109,7 @@ async def predict_toxicity(request: MessageRequest):
     )
 
 @app.post("/batch-predict")
-async def batch_predict(texts: list[str]):
+async def batch_predict(texts: List[str]):
     """
     Predice la toxicidad de múltiples mensajes
     

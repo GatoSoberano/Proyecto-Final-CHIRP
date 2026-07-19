@@ -2,32 +2,38 @@
 
 ## 📋 Tabla de Contenidos
 
-1. [Preparación Previa](#preparación-previa)
-2. [Deploy Backend API (FastAPI) a AWS](#deploy-backend-api-fastapi-a-aws)
-3. [Deploy Frontend a AWS](#deploy-frontend-a-aws)
+1. [Requisitos Previos](#requisitos-previos)
+2. [Deploy Backend (Lambda con Docker + ECR)](#deploy-backend-api-fastapi--lambda-con-docker)
+3. [Deploy Frontend (S3)](#deploy-frontend-s3--cloudfront)
 4. [Conectar Backend y Frontend](#conectar-backend-y-frontend)
-5. [Verificación y Testing](#verificación-y-testing)
-6. [Troubleshooting](#troubleshooting)
+5. [Testing y Verificación](#testing-y-verificación)
+6. [Alternativas de Tamaño](#-alternativas-por-qué-docker-en-vez-de-zip--layers)
+7. [Troubleshooting](#troubleshooting)
+8. [Costos y Mantenimiento](#costos-y-mantenimiento)
 
 ---
 
-## Preparación Previa
+## Requisitos Previos
 
-### 1. Instala AWS CLI (en tu máquina local)
+### 1. Instala AWS CLI y Docker (en tu máquina local)
 
-**Windows (PowerShell como Admin):**
+**AWS CLI - Windows (PowerShell como Admin):**
 
 ```powershell
 msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2.msi
 ```
 
-**Mac/Linux:**
+**AWS CLI - Mac/Linux:**
 
 ```bash
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 unzip awscliv2.zip
 sudo ./aws/install
 ```
+
+**Docker Desktop (necesario para construir la imagen del backend):**
+
+Descarga desde: https://www.docker.com/products/docker-desktop/
 
 ### 2. Configura AWS CLI con tus credenciales
 
@@ -63,168 +69,106 @@ dist/
 
 ---
 
-## Deploy Backend API (FastAPI) a AWS
+## Deploy Backend API (FastAPI + Lambda con Docker)
 
-### Opción A: AWS Elastic Beanstalk (Recomendado - Más Fácil)
+> ⚠️ **Historial del problema:** Con el enfoque de ZIP + Lambda Layers, el paquete descomprimido (código + dependencias) superó el límite de **250 MB (262,144,000 bytes)** que Lambda impone a los despliegues tipo ZIP. Ese límite es fijo y no se puede aumentar agregando más layers.
+>
+> **Solución elegida:** Empaquetar el backend como **imagen de contenedor Docker** y subirla a **Amazon ECR**. Lambda con imágenes de contenedor admite hasta **10 GB**, y no aplica el límite de 250 MB descomprimido porque no es un despliegue ZIP.
 
-#### Paso 1: Instala EB CLI
+#### Paso 1: Instala Docker Desktop (si no lo tienes)
 
-**Windows (PowerShell como Admin):**
+Descarga desde: https://www.docker.com/products/docker-desktop/
+
+Verifica la instalación:
 
 ```powershell
-pip install awsebcli
+docker --version
 ```
 
-**Mac/Linux:**
+#### Paso 2: El código ya está preparado
 
-```bash
-pip install awsebcli --user
+El archivo `main.py` ya tiene lo necesario:
+
+- ✅ `from mangum import Mangum` - Convierte FastAPI a Lambda handler
+- ✅ `handler = Mangum(app)` - AWS Lambda usará esta línea
+- ✅ CORS habilitado
+- ✅ Python 3.10+ compatible
+
+También existe `backend_test_model/Dockerfile`:
+
+```dockerfile
+FROM public.ecr.aws/lambda/python:3.10
+
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+
+COPY main.py ${LAMBDA_TASK_ROOT}/
+COPY TrainedModel ${LAMBDA_TASK_ROOT}/TrainedModel
+
+CMD [ "main.handler" ]
 ```
 
-#### Paso 2: Crea archivo `wsgi.py` en `backend_test_model/`
+#### Paso 3: Construye la imagen localmente
 
-En `backend_test_model/wsgi.py`:
-
-```python
-from main import app
-
-if __name__ == "__main__":
-    app.run()
+```powershell
+cd backend_test_model
+docker build -t toxicity-api:latest .
 ```
 
-#### Paso 3: Crea archivo `.ebextensions/python.config`
+Verifica que la imagen se creó:
 
-Crea la carpeta `.ebextensions` en `backend_test_model/` y dentro un archivo `python.config`:
-
-```yaml
-option_settings:
-  aws:autoscaling:launchconfiguration:
-    IamInstanceProfile: aws-elasticbeanstalk-ec2-role
-  aws:elasticbeanstalk:container:python:
-    WSGIPath: wsgi:app
-  aws:elasticbeanstalk:environment:proxy:
-    ProxyServer: nginx
-    GzipCompression: true
-  aws:elasticbeanstalk:cloudwatch:logs:
-    StreamLogs: true
-    DeleteOnTerminate: false
-
-packages:
-  yum:
-    gcc-c++: []
-    zlib-devel: []
+```powershell
+docker images toxicity-api
 ```
 
-#### Paso 4: Inicializa Elastic Beanstalk
+#### Paso 4: Crea un repositorio en Amazon ECR
 
-En la carpeta `backend_test_model/`:
-
-```bash
-eb init -p python-3.9 toxicity-api --region us-east-1
+```powershell
+aws ecr create-repository --repository-name toxicity-api --region us-east-1
 ```
 
-Responde las preguntas:
-
-- ¿Usar CodeCommit? → `N`
-- ¿SSH a instancias? → `Y`
-- ¿Seleccionar key pair? → Crea uno nuevo o selecciona uno existente
-
-#### Paso 5: Crea el entorno y deploya
-
-```bash
-eb create toxicity-api-env --instance-type t3.small
-```
-
-Esto tardará 5-10 minutos. Espera hasta que el entorno esté listo.
-
-Cuando esté listo, verás algo como:
+Guarda el `repositoryUri` que devuelve, tendrá esta forma:
 
 ```
-Environment details for: toxicity-api-env
-  Environment URL: toxicity-api-env.elasticbeanstalk.com
+123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api
 ```
 
-#### Paso 6: Verifica que funciona
+#### Paso 5: Autentica Docker contra ECR
 
-```bash
-curl https://toxicity-api-env.elasticbeanstalk.com/
+```powershell
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
 ```
 
-Deberías ver:
+Reemplaza `123456789012` con tu Account ID real de AWS.
 
-```json
-{
-  "status": "online",
-  "service": "Toxicity Model API",
-  "version": "1.0.0"
-}
+#### Paso 6: Etiqueta y sube la imagen a ECR
+
+```powershell
+docker tag toxicity-api:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
 ```
 
-#### Paso 7: Obtén la URL del Backend
+Esto puede tardar unos minutos dependiendo de tu conexión (la imagen incluye scikit-learn, ~500 MB-1 GB sin comprimir, muy por debajo del límite de 10 GB).
 
-Tu URL será: `https://toxicity-api-env.elasticbeanstalk.com`
+#### Paso 7: Crea la función Lambda desde la imagen de contenedor
 
-**Guárdala para el siguiente paso.**
-
----
-
-### Opción B: AWS Lambda + API Gateway (Sin Servidor - Más Económico)
-
-#### Paso 1: Prepara el código
-
-Modifica `main.py` para que funcione con AWS Lambda:
-
-En `backend_test_model/lambda_handler.py`:
-
-```python
-from main import app
-from mangum import Mangum
-
-# Envuelve la app FastAPI para que funcione con Lambda
-handler = Mangum(app)
-```
-
-#### Paso 2: Actualiza `requirements.txt`
-
-Agrega `mangum`:
-
-```
-fastapi==0.104.1
-uvicorn==0.24.0
-joblib==1.3.2
-scikit-learn==1.3.2
-pydantic==2.5.0
-mangum==0.17.0
-```
-
-#### Paso 3: Crea el paquete ZIP
-
-```bash
-pip install -r requirements.txt -t package/
-Copy-Item -Path "." -Destination "package/" -Exclude @(".git", ".gitignore", ".venv", "*.pyc")
-cd package
-Compress-Archive -Path "." -DestinationPath "../lambda-deployment.zip"
-cd ..
-```
-
-#### Paso 4: Crea la función Lambda en AWS Console
-
-1. Ve a **AWS Lambda** en la consola
+1. Ve a **AWS Lambda** (https://console.aws.amazon.com/lambda/)
 2. Click **Create function**
-3. Rellena:
+3. Selecciona **Container image** (no "Author from scratch")
+4. Rellena:
    - **Function name**: `toxicity-api-function`
-   - **Runtime**: `Python 3.9`
+   - **Container image URI**: Click **Browse images** → selecciona el repositorio `toxicity-api` → tag `latest`
    - **Architecture**: `x86_64`
-4. Click **Create function**
+5. Click **Create function**
 
-#### Paso 5: Sube el código
+#### Paso 8: Configura Memory y Timeout
 
-1. En la función Lambda, scroll hasta **Code source**
-2. Click **Upload from** → **ZIP file**
-3. Sube `lambda-deployment.zip`
-4. Click **Deploy**
+1. En **Configuration** → **General configuration**, click **Edit**
+2. **Memory**: `1024 MB` (necesario para scikit-learn)
+3. **Timeout**: `60 segundos`
+4. Click **Save**
 
-#### Paso 6: Configura API Gateway
+#### Paso 9: Configura API Gateway
 
 1. Ve a **API Gateway** en AWS Console
 2. Click **Create API** → **REST API**
@@ -239,7 +183,7 @@ cd ..
 7. Click **Save**
 8. Repite para **GET** también
 
-#### Paso 7: Deploya el API
+#### Paso 10: Deploya el API
 
 1. Click **Deploy API**
 2. **Stage name**: `prod`
@@ -249,7 +193,7 @@ Tu URL será algo como: `https://abcd1234.execute-api.us-east-1.amazonaws.com/pr
 
 ---
 
-## Deploy Frontend a AWS
+## Deploy Frontend (S3 + CloudFront)
 
 ### Opción A: S3 + CloudFront (Recomendado)
 
@@ -363,10 +307,10 @@ Por:
 ```javascript
 const apiUrl =
   apiUrlInput.value.trim() ||
-  "https://toxicity-api-env.elasticbeanstalk.com/predict";
+  "https://abc123def.execute-api.us-east-1.amazonaws.com/prod/predict";
 ```
 
-Reemplaza con tu URL real del backend.
+Reemplaza con tu URL real de API Gateway.
 
 ### Paso 2: Asegúrate que CORS esté habilitado en el Backend
 
@@ -393,21 +337,25 @@ allow_origins=[
 ],
 ```
 
-### Paso 3: Re-deploya el Backend (si cambiaste CORS)
+### Paso 3: Re-deploya el Backend (si cambiaste código o CORS)
 
-**Con Elastic Beanstalk:**
+Con Docker + ECR, cualquier cambio (código o dependencias) requiere reconstruir y volver a subir la imagen:
 
-```bash
+```powershell
 cd backend_test_model
-eb deploy
+
+# 1. Reconstruye la imagen
+docker build -t toxicity-api:latest .
+
+# 2. Etiqueta y sube a ECR (reemplaza con tu Account ID)
+docker tag toxicity-api:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+
+# 3. Actualiza la función Lambda para usar la nueva imagen
+aws lambda update-function-code `
+  --function-name toxicity-api-function `
+  --image-uri 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
 ```
-
-**Con Lambda:**
-
-1. Modifica el código
-2. Haz ZIP nuevo
-3. Sube a Lambda
-4. Click **Deploy**
 
 ### Paso 4: Re-sube el Frontend
 
@@ -428,12 +376,12 @@ git push
 
 ---
 
-## Verificación y Testing
+## Testing y Verificación
 
 ### Paso 1: Prueba el Backend directamente
 
 ```bash
-curl -X POST "https://toxicity-api-env.elasticbeanstalk.com/predict" \
+curl -X POST "https://abc123def.execute-api.us-east-1.amazonaws.com/prod/predict" \
   -H "Content-Type: application/json" \
   -d '{"text": "gracias por el gran trabajo equipo"}'
 ```
@@ -463,18 +411,51 @@ Deberías ver un formulario donde:
 
 ### Paso 3: Revisa los logs del Backend
 
-**Con Elastic Beanstalk:**
-
-```bash
-cd backend_test_model
-eb logs
-```
-
-**Con Lambda:**
-
 1. Ve a **AWS Lambda** → Tu función
 2. Abre la pestaña **Monitor**
 3. Click **View CloudWatch logs**
+
+---
+
+## 🔧 Alternativas: ¿Por qué Docker en vez de ZIP + Layers?
+
+El enfoque original con **ZIP + Lambda Layers** funciona bien para dependencias livianas, pero en este proyecto el paquete descomprimido (scikit-learn + numpy + scipy + el modelo `.pkl`) superó el límite fijo de **250 MB descomprimidos** que Lambda impone a los despliegues tipo ZIP (con o sin Layers). Ese límite **no se puede aumentar**, sin importar cuántos Layers uses.
+
+### Opción 1: Docker Image en ECR (RECOMENDADO ✅ - la que usamos)
+
+**Ventajas:**
+
+- Permite hasta 10 GB (muy por encima del límite de 250 MB de los ZIP)
+- No aplica el límite de tamaño descomprimido de los despliegues ZIP
+- Máximo control sobre el entorno (versiones exactas de librerías del sistema)
+
+**Desventaja:** Requiere Docker instalado localmente y un poco más de tiempo de build/push.
+
+_Ya está explicado arriba en los pasos 1-10._
+
+### Opción 2: ZIP + Lambda Layers (Descartada para este proyecto)
+
+**Por qué no funciona aquí:** El límite de 250 MB descomprimido se supera con scikit-learn + numpy + scipy + el modelo entrenado. Es una buena opción solo si tus dependencias son livianas.
+
+### Opción 3: EC2 / Lightsail / App Runner (Fuera de Lambda)
+
+Si en el futuro Docker no fuera viable, otras alternativas sin límite de tamaño de Lambda son:
+
+- **EC2**: instancia virtual donde corres `uvicorn` directamente. Sin límites de tamaño, pero requiere mantener el servidor encendido.
+- **AWS App Runner**: despliega la misma imagen de contenedor (ECR) sin pasar por Lambda, con autoescalado incluido.
+- **AWS Lightsail**: la opción más simple y económica (~$3.50-5/mes) para correr un contenedor o VM pequeña.
+
+---
+
+### Resumen: ¿Cuál elegir?
+
+| Opción                       | Tamaño máx.          | Dificultad | Recomendación                               |
+| ---------------------------- | -------------------- | ---------- | ------------------------------------------- |
+| Docker + ECR (Lambda)        | Hasta 10 GB          | ⭐⭐ Media | ✅ ELEGIDA para este proyecto               |
+| ZIP + Layers                 | 250 MB total         | ⭐ Fácil   | Solo si las dependencias son livianas       |
+| EC2 / App Runner / Lightsail | Sin límite de Lambda | ⭐⭐ Media | Si se necesita salir de Lambda por completo |
+
+**Recomendación:** Con scikit-learn en el proyecto, Docker + ECR es la solución estándar en AWS para evitar el límite de 250 MB. 🎯
 
 ---
 
@@ -484,19 +465,19 @@ eb logs
 
 **Causas comunes:**
 
-1. CORS no habilitado → Verifica `main.py`
-2. URL incorrecta → Copia la URL exacta de AWS
-3. Backend no está corriendo → Revisa logs con `eb logs`
+1. CORS no habilitado → Verifica `main.py` y la configuración de API Gateway
+2. URL incorrecta → Copia la URL exacta de API Gateway (incluye `/prod` al final)
+3. Lambda no responde → Revisa CloudWatch Logs
+4. Imagen de contenedor desactualizada → Verifica que subiste la imagen más reciente a ECR y actualizaste la función
 
 **Soluciones:**
 
 ```bash
-# Reinicia el ambiente Elastic Beanstalk
-cd backend_test_model
-eb restart
+# Revisa el estado y configuración de la función
+aws lambda get-function --function-name toxicity-api-function
 
-# Revisa estado
-eb status
+# Revisa los logs recientes
+aws logs tail /aws/lambda/toxicity-api-function --follow
 ```
 
 ### ❌ Error: "ModuleNotFoundError: No module named 'scikit_learn'"
@@ -524,6 +505,24 @@ const response = await fetch(apiUrl, {
 });
 ```
 
+### ❌ Error: "Request entity too large", "File too large" o límite de 250 MB descomprimido superado
+
+**Causa:** Estás usando despliegue tipo ZIP (con o sin Lambda Layers) y el total descomprimido (código + dependencias) supera el límite fijo de **250 MB** de Lambda. Este límite no se puede aumentar agregando más layers.
+
+**Solución:** Usa **Docker + ECR** en vez de ZIP. Lambda con imágenes de contenedor admite hasta 10 GB y no aplica este límite.
+
+```powershell
+cd backend_test_model
+docker build -t toxicity-api:latest .
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+docker tag toxicity-api:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+```
+
+Luego crea (o actualiza) la función Lambda seleccionando **Container image** en vez de subir un ZIP.
+
+Ver sección "[🔧 Alternativas: ¿Por qué Docker en vez de ZIP + Layers?](#-alternativas-por-qué-docker-en-vez-de-zip--layers)" para más detalles.
+
 ### ❌ Frontend se carga pero no conecta con Backend
 
 1. Abre DevTools del navegador (F12)
@@ -536,13 +535,14 @@ const response = await fetch(apiUrl, {
 
 ## Costos Estimados en AWS
 
-| Servicio                         | Uso Ligero          | Costo Aproximado      |
-| -------------------------------- | ------------------- | --------------------- |
-| **Elastic Beanstalk** (t3.small) | 720 horas/mes       | $20-30/mes            |
-| **Lambda**                       | <1M requests/mes    | <$1/mes (gratis)      |
-| **S3**                           | <1GB + 10K requests | <$1/mes               |
-| **CloudFront**                   | <10GB/mes           | Incluido en free tier |
-| **Total**                        | Típico              | $20-35/mes            |
+| Servicio        | Uso Ligero          | Costo Aproximado      |
+| --------------- | ------------------- | --------------------- |
+| **Lambda**      | <1M requests/mes    | <$1/mes (gratis)      |
+| **API Gateway** | <1M requests/mes    | <$1/mes (gratis)      |
+| **ECR**         | <1GB almacenado     | <$0.10/mes            |
+| **S3**          | <1GB + 10K requests | <$1/mes               |
+| **CloudFront**  | <10GB/mes           | Incluido en free tier |
+| **Total**       | Típico              | <$3/mes               |
 
 ---
 
@@ -550,15 +550,21 @@ const response = await fetch(apiUrl, {
 
 ### Actualizar el Backend
 
-```bash
+```powershell
 cd backend_test_model
 
-# Haz cambios...
-git add .
-git commit -m "Actualización"
+# 1. Reconstruye la imagen con tus cambios
+docker build -t toxicity-api:latest .
 
-# Deploya
-eb deploy
+# 2. Autentica, etiqueta y sube a ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+docker tag toxicity-api:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
+
+# 3. Actualiza la función Lambda para usar la nueva imagen
+aws lambda update-function-code `
+  --function-name toxicity-api-function `
+  --image-uri 123456789012.dkr.ecr.us-east-1.amazonaws.com/toxicity-api:latest
 ```
 
 ### Actualizar el Frontend
@@ -572,23 +578,26 @@ aws s3 sync . s3://toxicity-model-frontend-1689123456 --delete
 
 ### Monitoreo
 
-- **Elastic Beanstalk**: Ve a AWS Console → Elastic Beanstalk → Tu app
 - **Lambda**: CloudWatch Logs
+- **API Gateway**: CloudWatch Metrics y Logs de la stage `prod`
+- **ECR**: Consola de ECR para ver tags/versiones de la imagen
 - **S3**: CloudWatch Metrics
 
 ---
 
 ## Resumen Rápido
 
-| Paso | Comando                                     | Resultado                     |
-| ---- | ------------------------------------------- | ----------------------------- |
-| 1    | `aws configure`                             | Credenciales AWS configuradas |
-| 2    | `eb init -p python-3.9 toxicity-api`        | Backend preparado             |
-| 3    | `eb create toxicity-api-env`                | Backend en vivo en AWS        |
-| 4    | `aws s3 mb s3://toxicity-frontend-xxx`      | Bucket S3 creado              |
-| 5    | `aws s3 sync frontend_test_model/ s3://...` | Frontend desplegado           |
-| 6    | Actualiza URL en `app.js`                   | Frontend conectado al backend |
-| 7    | Visita tu URL en navegador                  | ✅ Listo para usar            |
+| Paso | Comando                                             | Resultado                     |
+| ---- | --------------------------------------------------- | ----------------------------- |
+| 1    | `aws configure`                                     | Credenciales AWS configuradas |
+| 2    | `docker build -t toxicity-api .`                    | Imagen construida localmente  |
+| 3    | `aws ecr create-repository ...`                     | Repositorio ECR creado        |
+| 4    | `docker push ...`                                   | Imagen subida a ECR           |
+| 5    | Crea función Lambda (Container image) + API Gateway | Backend en vivo en AWS        |
+| 6    | `aws s3 mb s3://toxicity-frontend-xxx`              | Bucket S3 creado              |
+| 7    | `aws s3 sync frontend_test_model/ s3://...`         | Frontend desplegado           |
+| 8    | Actualiza URL en `app.js`                           | Frontend conectado al backend |
+| 9    | Visita tu URL en navegador                          | ✅ Listo para usar            |
 
 ---
 
@@ -596,6 +605,8 @@ aws s3 sync . s3://toxicity-model-frontend-1689123456 --delete
 
 Para más ayuda, contacta con soporte de AWS o revisa:
 
-- [AWS Elastic Beanstalk Docs](https://docs.aws.amazon.com/elasticbeanstalk/)
 - [AWS Lambda Docs](https://docs.aws.amazon.com/lambda/)
+- [AWS Lambda Container Images Docs](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)
+- [Amazon ECR Docs](https://docs.aws.amazon.com/AmazonECR/latest/userguide/)
+- [API Gateway Docs](https://docs.aws.amazon.com/apigateway/)
 - [AWS S3 Docs](https://docs.aws.amazon.com/s3/)

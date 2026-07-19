@@ -1,0 +1,6 @@
+# Runtime para AWS Lambda - Python 3.10
+# Archivo para especificar versión de Python en AWS Lambda
+
+# Este archivo no es necesario ser enviado, pero documenta:
+# - Lambda Python 3.10 es compatible con main.py actualizado
+# - Ver: https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html

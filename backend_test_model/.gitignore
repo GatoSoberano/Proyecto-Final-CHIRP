@@ -10,3 +10,5 @@ __pycache__/
 .env
 # Modelos grandes: se regeneran con el notebook o train_fallback.py
 # (si prefieres versionarlos, usa 
+# package
+package/
